@@ -1,4 +1,4 @@
-#' Count Table
+# Count Table
 #'
 #' Get count table from MGS normalized abundances.
 #'
@@ -110,7 +110,7 @@ get_count_table<-function(abund.path=NULL,sample_id=NULL,abund.table=NULL,prev.m
 #' some_inferences<-all_inferences(counts_from_table, rep.num=4)
 #' str(some_inferences, max.level=1)
 all_inferences <-function(data,edge_thresh=0.9, rep.num=100, n.levels=100,
-                         Offset=TRUE, covar=NULL, cores=1,
+                         Offset=TRUE, covar=NULL, cores=1, include_signed_coeff=FALSE,
                          methods=c("PLNnetwork","SpiecEasi","gCoda","EMtree","Magma","SPRING","ZiLN"),
                          seed=10010,subsample.ratio=NULL){
   if(!is.null(covar)) covar<-data.frame(covar)
@@ -118,28 +118,28 @@ all_inferences <-function(data,edge_thresh=0.9, rep.num=100, n.levels=100,
   #individual inferences
   res<-list()
   if("PLNnetwork"%in%methods){
-    output_PLN=just_PLN(data, rep.num, n.levels, edge_thresh, Offset,covar=covar,subsample.ratio=subsample.ratio)
+    output_PLN=just_PLN(data, rep.num, n.levels, edge_thresh, include_signed_coeff=include_signed_coeff,Offset,covar=covar,subsample.ratio=subsample.ratio)
     res$PLNnetwork<-output_PLN
   }
   if("gCoda"%in%methods){
     if(exists("output_PLN")){
-      lambda.seq<-output_PLN$lambda.seq
+      lambda.seq <- output_PLN$output$Penalty
+      lambda.seq=sort(unique(lambda.seq), decreasing = TRUE)
     }else{lambda.seq<-NULL}
-    output_gcoda=just_gcoda(data, rep.num,n.levels, cores, edge_thresh,
-                            lambda.seq=,covar=covar,subsample.ratio=subsample.ratio)
+    output_gcoda=just_gcoda(data, rep.num,n.levels, cores, edge_thresh, include_signed_coeff=include_signed_coeff, lambda.seq=lambda.seq,covar=covar,subsample.ratio=subsample.ratio)
     res$gCoda<-output_gcoda
   }
 
   if("SpiecEasi"%in%methods){
-    output_spiec=just_spiec(data, rep.num, n.levels, cores,edge_thresh, covar=covar,subsample.ratio=subsample.ratio)
+    output_spiec=just_spiec(data, rep.num, n.levels, cores,edge_thresh, include_signed_coeff = include_signed_coeff, covar=covar,subsample.ratio=subsample.ratio)
     res$SpiecEasi<-output_spiec
   }
   if("SPRING"%in%methods){
-    output_spring=just_spring(data, rep.num, n.levels, cores,edge_thresh, covar=covar, seed=seed,subsample.ratio=subsample.ratio)
+    output_spring=just_spring(data, rep.num, n.levels, cores,edge_thresh, include_signed_coeff=include_signed_coeff,covar=covar, seed=seed,subsample.ratio=subsample.ratio)
     res$SPRING<-output_spring
   }
   if("Magma"%in%methods){
-    output_magma=just_magma(data, rep.num, n.levels, edge_thresh, Offset,covar=covar,subsample.ratio=subsample.ratio)
+    output_magma=just_magma(data, rep.num, n.levels, edge_thresh, Offset,include_signed_coeff=include_signed_coeff,covar=covar,subsample.ratio=subsample.ratio)
     res$Magma<-output_magma
   }
   if("EMtree"%in%methods){
@@ -149,7 +149,7 @@ all_inferences <-function(data,edge_thresh=0.9, rep.num=100, n.levels=100,
   }
 
   if("ZiLN"%in%methods){
-    output_ZiLN=just_ZiLN(data, rep.num,n.levels, cores, edge_thresh,subsample.ratio=subsample.ratio)
+    output_ZiLN=just_ZiLN(data, rep.num,n.levels, cores, edge_thresh,include_signed_coeff=include_signed_coeff,subsample.ratio=subsample.ratio)
     res$ZiLN<-output_ZiLN
   }
 
@@ -262,7 +262,7 @@ adapt_mean_stability<-function(inference_collection,mean.stability=0.8,
 #' some_inferences<-all_inferences_new(data=counts_from_table, rep.num=4)
 #' str(some_inferences, max.level=1)
 all_inferences_new <-function(data, rep.num=100, 
-                              methods=c("PLNnetwork","SpiecEasi","gCoda","EMtree","Magma","SPRING","ZiLN"),
+                              methods=c("PLNnetwork","SpiecEasi","gCoda","EMtree","Magma","SPRING","ZiLN"), include_signed_coeff=TRUE,
                               fast=FALSE, parallel=FALSE, ...){
   if(fast){
     methods=setdiff(methods, "PLNnetwork")

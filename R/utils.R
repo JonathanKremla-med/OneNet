@@ -65,8 +65,7 @@ bn<-function(n){
 #' @importFrom parallel mclapply
 #' @importFrom stats as.formula var
 #' @noRd
-resamp_gcoda<-function(data,lambda.seq=NULL,lambda.min.ratio =1e-2,covar=NULL,
-                       nlambda=100, B=100, cores=1,subsample.ratio=NULL){
+resamp_gcoda<-function(data,lambda.seq=NULL,lambda.min.ratio =1e-2, covar=NULL, nlambda=100, B=100, cores=1,subsample.ratio=NULL){
   p=ncol(data) ; n = nrow(data) ;
   if(is.null(subsample.ratio)) subsample.ratio<-bn(n)
   V = round(subsample.ratio* n)
@@ -92,31 +91,35 @@ resamp_gcoda<-function(data,lambda.seq=NULL,lambda.min.ratio =1e-2,covar=NULL,
   }
   #resampling
   obj=mclapply(1:B,function(b){
-    res=tryCatch({
+    tryCatch({
       set.seed(b)
-      sample = sample(1:n, V, replace = F)
-      data.sample = data[sample, ]
+      samp = sample(1:n, V, replace = F)
+      data.sample = data[samp, ]
       if(!is.null(covar)){
-        covar.samp=data.frame(covar[sample, ])
+        covar.samp=data.frame(covar[samp, ])
       }else{covar.samp=NULL}
-      res=gcoda(data.sample, counts=T, covar=covar.samp, lambda.seq=lambda.seq, nlambda = nlambda)$path
+      fit=gcoda(data.sample, counts=T, covar=covar.samp, lambda.seq=lambda.seq, nlambda = nlambda)
+      list(path=fit$path, opt.icov=fit$opt.icov)
     }, error=function(e){e}, finally={})
-    return(res)
   }, mc.cores=cores)
   #keep only successful optimizations
-  good.cores=which(do.call(rbind,lapply(obj,length))==nlambda)
+  good.cores=which(sapply(obj, function(x) is.list(x) && !inherits(x, "error") && length(x$path)==nlambda))
   obj=obj[good.cores]
   #compute edge selection frequencies
-  nb.lambda=min(do.call(rbind,lapply(obj, function(x) length(x))))
+  nb.lambda=min(sapply(obj, function(x) length(x$path)))
   if(!is.finite(nb.lambda)) message("Numerical instability in gCoda")
   list_freqs=do.call(rbind,lapply(1:nb.lambda, function(i){
-    matfreq=Reduce("+",lapply(obj, function(x) x[[i]]))/B
-    res=data.frame(freqs=ToVec(matfreq),
-                   pen=lambda.seq[i])
-    return(res)
+    matfreq=Reduce("+",lapply(obj, function(x) x$path[[i]]))/B
+    data.frame(freqs=ToVec(matfreq), pen=lambda.seq[i])
   }))
+  #aggregate partial correlations from opt.icov across subsamples
+  agg_pcor=Reduce("+", lapply(obj, function(x){
+    pcor=-cov2cor(x$opt.icov)
+    diag(pcor)=1
+    pcor
+  })) / length(obj)
 
-  return(list_freqs)
+  return(list(list_freqs = list_freqs, agg_pcor = agg_pcor))
 }
 
 #' Stability for EMtree
@@ -255,7 +258,7 @@ just_EMtree<-function(data, rep.num=100, n.levels=100, edge_thresh=0.9, Offset=T
 #' SpiecEasi_output<-just_spiec(counts_from_table, rep.num=2, cores=1)
 #' str(SpiecEasi_output, max.level=2)
 #' }
-just_spiec<-function(data, rep.num=100, n.levels=100, cores=1, edge_thresh=0.9,covar=NULL,subsample.ratio=NULL, ...){
+just_spiec<-function(data, rep.num=100, n.levels=100, include_signed_coeff = FALSE,cores=1, edge_thresh=0.9,covar=NULL,subsample.ratio=NULL, ...){
   cat("\nSpiecEasi...")
   t1<-Sys.time()
   p=ncol(data) ; ne = p*(p-1)/2
@@ -284,6 +287,13 @@ just_spiec<-function(data, rep.num=100, n.levels=100, cores=1, edge_thresh=0.9,c
                 opt.index=spiec.out$stars$opt.index,
                 refit=spiec.out$refit)
 
+	if(include_signed_coeff){
+		path_signs <- lapply(spiec.out$est$beta, function(b) {
+				pcor <- as.matrix(SpiecEasi::symBeta(b, mode='ave'))
+				return(sign(pcor))
+		})
+		output$signed.coeff <- path_signs
+	}
   }else{
 
     spiec.out=spiec.easi(data, method="mb",pulsar.select = TRUE,nlambda=n.levels,
@@ -296,6 +306,14 @@ just_spiec<-function(data, rep.num=100, n.levels=100, cores=1, edge_thresh=0.9,c
     output=list(merge=spiec.out$select$stars$merge, lambda=spiec.out$lambda,
                 opt.index=spiec.out$select$stars$opt.index,
                 refit=spiec.out$refit)
+
+    if(include_signed_coeff) {
+		path_signs <- lapply(spiec.out$est$beta, function(b) {
+				pcor <- as.matrix(SpiecEasi::symBeta(b, mode='ave'))
+				return(sign(pcor))
+		})
+		output$signed.coeff <- path_signs
+     }
   }
 
   lambda_stab=stab_stars(output,edge_thresh)
@@ -326,8 +344,7 @@ just_spiec<-function(data, rep.num=100, n.levels=100, cores=1, edge_thresh=0.9,c
 #' Magma_output<-just_magma(counts_from_table, rep.num=2)
 #' str(Magma_output, max.level=2)
 #' }
-just_magma<-function(data, rep.num=100, n.levels=100, edge_thresh=0.9, Offset=TRUE,
-                     covar=NULL, subsample.ratio=NULL,...){
+just_magma<-function(data, rep.num=100, n.levels=100, edge_thresh=0.9, include_signed_coeff = FALSE, Offset=TRUE, covar=NULL, subsample.ratio=NULL,...){
   cat("\nMagma...")
   t1<-Sys.time()
   stability=0.9
@@ -348,6 +365,13 @@ just_magma<-function(data, rep.num=100, n.levels=100, edge_thresh=0.9, Offset=TR
   lambda_stab=stab_stars(output,edge_thresh)
   t2<-Sys.time() ; diff=difftime(t2, t1)
   cat( paste0(round(diff,3),attr(diff,"units")))
+  if(include_signed_coeff){
+		path_signs <- lapply(output$beta, function(b) {
+				pcor <- as.matrix(SpiecEasi::symBeta(b, mode='ave'))
+				return(sign(pcor))
+		})
+		output$signed.coeff <- path_signs
+  }
   output$path<-output$beta<-NULL
   return(list(output=output, lambda_stab=lambda_stab, nedges=ne))
 }
@@ -378,7 +402,7 @@ just_magma<-function(data, rep.num=100, n.levels=100, edge_thresh=0.9, Offset=TR
 #' spring_output<-just_spring(counts_from_table, rep.num=2, cores=1)
 #' str(spring_output, max.level=2)
 #' }
-just_spring<-function(data, rep.num=100, n.levels=100, cores=1, edge_thresh=0.9,covar=NULL,seed=10010,
+just_spring<-function(data, rep.num=100, n.levels=100, cores=1, include_signed_coeff = FALSE ,edge_thresh=0.9,covar=NULL,seed=10010,
                       subsample.ratio=NULL,...){
   cat("\nSPRING...")
   t1<-Sys.time()
@@ -418,6 +442,15 @@ just_spring<-function(data, rep.num=100, n.levels=100, cores=1, edge_thresh=0.9,
   }
   stars_output<-list(merge=output$stars$merge,lambda=output$est$lambda)
   lambda_stab=stab_stars(stars_output,edge_thresh)
+
+  if(include_signed_coeff) {
+		path_signs <- lapply(output$est$beta, function(b) {
+				pcor <- as.matrix(SpiecEasi::symBeta(b, mode='ave'))
+				return(sign(pcor))
+		})
+		output$signed.coeff <- path_signs
+  }
+
   t2<-Sys.time() ; diff=difftime(t2, t1)
   cat(paste0(round(diff,3),attr(diff,"units")))
   output$est<-NULL
@@ -439,7 +472,7 @@ just_spring<-function(data, rep.num=100, n.levels=100, cores=1, edge_thresh=0.9,
 #' @importFrom huge huge.mb
 #' @importFrom stats cor
 ##' @noRd
-resamp_ZiLN<-function(data, rep.num, n.levels,lambda.min.ratio =1e-2, cores,subsample.ratio=NULL){
+resamp_ZiLN<-function(data, rep.num, n.levels,lambda.min.ratio =1e-2, cores, include_signed_coeff = FALSE, subsample.ratio=NULL){
   p<-ncol(data) ; n<-nrow(data)
   if(is.null(subsample.ratio)) subsample.ratio<-bn(n)
   V = round(subsample.ratio * n)
@@ -456,8 +489,7 @@ resamp_ZiLN<-function(data, rep.num, n.levels,lambda.min.ratio =1e-2, cores,subs
     data.sample = data[sample, ]
     Z = infer_Z(data.sample, seq_depth = "TS")
     mb_Z2 = huge.mb(Z, lambda = pen, verbose = F)
-    path = mb_Z2$path
-
+	path=mb_Z2$path
   }, mc.cores=cores)
 
   list_freqs=do.call(rbind,lapply(1:n.levels, function(i){
@@ -466,7 +498,7 @@ resamp_ZiLN<-function(data, rep.num, n.levels,lambda.min.ratio =1e-2, cores,subs
                    pen=pen[i])
     return(res)
   }))
-  return(list_freqs)
+  return(list(list_freqs=list_freqs, pen = pen, Z_full = Z))
 }
 
 #' Wrapper for ZiLN
@@ -492,17 +524,33 @@ resamp_ZiLN<-function(data, rep.num, n.levels,lambda.min.ratio =1e-2, cores,subs
 #' ZiLN_output<-just_ZiLN(counts_from_table, rep.num=2, cores=1)
 #' str(ZiLN_output, max.level=2)
 #' }
-just_ZiLN<-function(data, rep.num=100,n.levels=100, cores=1,edge_thresh=0.9, subsample.ratio=NULL,... ){
+just_ZiLN<-function(data, rep.num=100,n.levels=100, cores=1, include_signed_coeff = FALSE, edge_thresh=0.9, subsample.ratio=NULL,... ){
   cat("\nZiLN...")
   t1<-Sys.time()
   p=ncol(data) ; ne = p*(p-1)/2
-  list_freqs<-resamp_ZiLN(data,lambda.min.ratio =1e-2,n.levels=n.levels, rep.num=rep.num, cores=cores,
+  resamp_out <-resamp_ZiLN(data,lambda.min.ratio =1e-2,n.levels=n.levels, rep.num=rep.num, cores=cores,
                           subsample.ratio=subsample.ratio)
+  list_freqs <- resamp_out$list_freqs
+  pen_seq <- resamp_out$pen
+  Z_full <- resamp_out$Z_full
+
   lambda.seq= unique(list_freqs%>% select(pen) %>% pull())
+
 
   lambda_stab=list_freqs %>% rename(lambda=pen) %>%  group_by(lambda) %>%
     summarise(stability=1-4*mean(freqs*(1-freqs)), nedges=sum(freqs>edge_thresh))
   lambda_stab=lambda_stab[,c("stability", "nedges","lambda")]
+
+  #rerun inference on optimal lambda to get signed coefficients
+  if(include_signed_coeff){
+		full_fit <- huge::huge(Z_full, method = "mb", lambda = pen_seq, verbose = FALSE)
+		path_signs <- do.call(rbind, lapply(1:length(pen_seq), function(i) {
+				pcor <- as.matrix(SpiecEasi::symBeta(full_fit$beta[[i]], mode='ave'))
+				data.frame(signed.coeff = ToVec(sign(pcor)))
+		}))
+		list_freqs$signed.coeff <- path_signs$signed.coeff
+  }
+
   t2<-Sys.time() ; diff=difftime(t2, t1)
   cat( paste0(round(diff,3),attr(diff,"units")))
   list_freqs<-list_freqs %>% as_tibble() %>%
@@ -535,7 +583,7 @@ just_ZiLN<-function(data, rep.num=100,n.levels=100, cores=1,edge_thresh=0.9, sub
 #' PLN_output<-just_PLN(counts_from_table, rep.num=2)
 #' str(PLN_output, max.level=2)
 #' }
-just_PLN<-function(data, rep.num=100, n.levels=100,edge_thresh=0.9, Offset=TRUE, covar=NULL,subsample.ratio=NULL, ...){
+just_PLN<-function(data, rep.num=100, n.levels=100, include_signed_coeff=TRUE, edge_thresh=0.9, Offset=TRUE, covar=NULL,subsample.ratio=NULL, ...){
   cat("\nPLNnetwork...")
   stability=0.9
   t1<-Sys.time()
@@ -572,6 +620,25 @@ just_PLN<-function(data, rep.num=100, n.levels=100,edge_thresh=0.9, Offset=TRUE,
   t2<-Sys.time() ; diff=difftime(t2, t1)
   cat(paste0(round(diff,3),attr(diff,"units")))
   output<-network_models$stability_path %>% select(Penalty,Prob)
+  if(include_signed_coeff) {
+		  coef_path <- network_models$coefficient_path()
+		  penalties <- unique(coef_path$Penalty)
+		  v_df <- data.frame(name = colnames(data))
+		  path_signs <- do.call(rbind,lapply(penalties, function(pen) {
+				edges_pen <- coef_path[coef_path$Penalty == pen, ]
+				edges_pen$Sign <- sign(edges_pen$Coeff)
+				g <- igraph::graph_from_data_frame(
+						d = edges_pen[, c("Node1", "Node2", "Sign")],
+						directed = FALSE,
+						vertices = v_df
+				)
+				sign_mat <- as.matrix(igraph::as_adjacency_matrix(g, attr = "Sign", sparse = FALSE))
+				diag(sign_mat) <- 1
+				data.frame(signed.coeff=ToVec(sign_mat))
+		}))
+		  output$signed.coeff <- path_signs$signed.coeff
+  }
+  
   return(list(output=output,lambda_stab=lambda_stab, nedges=ne))
 }
 
@@ -599,18 +666,24 @@ just_PLN<-function(data, rep.num=100, n.levels=100,edge_thresh=0.9, Offset=TRUE,
 #' gcoda_output<-just_gcoda(counts_from_table, rep.num=2, cores=1)
 #' str(gcoda_output, max.level=2)
 #' }
-just_gcoda<-function(data, rep.num=100,n.levels=100, cores=1,edge_thresh=0.9,lambda.seq=NULL, covar=NULL,
-                     subsample.ratio=NULL, ...){
+just_gcoda<-function(data, rep.num=100,n.levels=100, cores=1,edge_thresh=0.9,lambda.seq=NULL, covar=NULL,include_signed_coeff = FALSE,subsample.ratio=NULL, ...){
   cat("\ngCoda...")
   t1<-Sys.time()
   p=ncol(data) ; ne = p*(p-1)/2
-  list_freqs<-quiet(resamp_gcoda(data,lambda.seq=lambda.seq,covar=covar,lambda.min.ratio =1e-2,
-                                 nlambda=n.levels, B=rep.num, cores=cores,subsample.ratio=subsample.ratio))
+  resamp_out<-quiet(resamp_gcoda(data,lambda.seq=lambda.seq,covar=covar,lambda.min.ratio =1e-2,
+                                nlambda=n.levels, B=rep.num, cores=cores,subsample.ratio=subsample.ratio))
+  list_freqs <- resamp_out$list_freqs
   lambda.seq= unique(list_freqs %>% select(pen) %>% pull())
 
   lambda_stab=list_freqs %>% rename(lambda=pen) %>%  group_by(lambda) %>%
     summarise(stability=1-4*mean(freqs*(1-freqs)), nedges=sum(freqs>edge_thresh))
   lambda_stab=lambda_stab[,c("stability", "nedges","lambda")]
+
+  if(include_signed_coeff){
+    opt_signs <- ToVec(sign(resamp_out$agg_pcor))
+    list_freqs$signed.coeff <- rep(opt_signs, nrow(list_freqs) / length(opt_signs))
+  }
+
   t2<-Sys.time() ; diff=difftime(t2, t1)
   cat( paste0(round(diff,3),attr(diff,"units")))
   list_freqs<-list_freqs %>% as_tibble() %>%
